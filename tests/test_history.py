@@ -24,8 +24,8 @@ class FakeMessage:
 @dataclass
 class FakeFetchResponse:
     messages: list[FakeMessage]
-    has_more: bool
     next_seq: int
+    last_seq: int
 
 
 @dataclass
@@ -53,14 +53,18 @@ class FakeClient:
     def get_channel(self, principal, token, channel_id):
         return FakeChannelResponse(FakeChannel(channel_id, self.channels.get(channel_id, "")))
 
-    def fetch(self, principal, token, from_seq, limit, only_my_recipient=False):
-        self.fetch_calls.append((from_seq, limit, only_my_recipient))
+    def fetch(self, principal, token, from_seq, limit, only_my_recipient=False, channels=()):
+        channels = tuple(channels)
+        self.fetch_calls.append((from_seq, limit, only_my_recipient, channels))
         matches = [message for message in self.messages if message.seq >= from_seq]
+        if channels:
+            matches = [message for message in matches if message.channel_id in channels]
         if only_my_recipient:
             matches = [message for message in matches if principal in message.recipients]
         batch = matches[:limit]
-        next_seq = batch[-1].seq + 1 if batch else self.get_status(principal, token).max_seq + 1
-        return FakeFetchResponse(messages=batch, has_more=len(matches) > len(batch), next_seq=next_seq)
+        status = self.get_status(principal, token)
+        next_seq = batch[-1].seq + 1 if len(matches) > len(batch) else status.max_seq + 1
+        return FakeFetchResponse(messages=batch, next_seq=next_seq, last_seq=status.max_seq)
 
 
 class HistoryTests(unittest.TestCase):
@@ -110,6 +114,43 @@ class HistoryTests(unittest.TestCase):
         )
         result = service.query(HistoryQuery(1, "tok", None, 2, "desc", 100, False))
         self.assertEqual([item["seq"] for item in result["messages"]], [3, 1])
+        self.assertTrue(all(call[3] == (100,) for call in client.fetch_calls))
+
+    def test_asc_query_uses_last_seq_for_more(self):
+        client = FakeClient(
+            [
+                FakeMessage(1, 10, 100, 1, [], b'{"n":1}'),
+                FakeMessage(2, 20, 100, 1, [], b'{"n":2}'),
+                FakeMessage(3, 30, 100, 1, [], b'{"n":3}'),
+            ]
+        )
+        service = HistoryService(
+            client,
+            HistoryConfig(default_limit=2, max_limit=1000, fetch_batch_size=2, max_scan_messages=10),
+            PayloadConfig(),
+        )
+        result = service.query(HistoryQuery(1, "tok", None, 2, "asc", None, False))
+        self.assertEqual([item["seq"] for item in result["messages"]], [1, 2])
+        self.assertEqual(result["next_cursor"], "3")
+        self.assertTrue(result["has_more"])
+
+    def test_asc_channel_filter_uses_page_limit(self):
+        client = FakeClient(
+            [
+                FakeMessage(1, 10, 100, 1, [], b'{"n":1}'),
+                FakeMessage(2, 20, 100, 1, [], b'{"n":2}'),
+                FakeMessage(3, 30, 100, 1, [], b'{"n":3}'),
+            ]
+        )
+        service = HistoryService(
+            client,
+            HistoryConfig(default_limit=2, max_limit=1000, fetch_batch_size=10, max_scan_messages=10),
+            PayloadConfig(),
+        )
+        result = service.query(HistoryQuery(1, "tok", None, 2, "asc", 100, False))
+        self.assertEqual([item["seq"] for item in result["messages"]], [1, 2])
+        self.assertEqual(result["next_cursor"], "3")
+        self.assertEqual(client.fetch_calls[0], (1, 2, False, (100,)))
 
     def test_parse_query_defaults(self):
         query = parse_history_query({"principal": "10", "token": "tok"}, HistoryConfig(default_limit=7))

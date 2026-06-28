@@ -26,6 +26,7 @@ class OpenEventClientProtocol(Protocol):
         from_seq: int,
         limit: int,
         only_my_recipient: bool = False,
+        channels: tuple[int, ...] = (),
     ) -> Any:
         ...
 
@@ -63,25 +64,22 @@ class HistoryService:
         scanned = 0
         next_seq = from_seq
         has_more = False
+        channels = _query_channels(query)
 
         while len(collected) < query.limit and scanned < self._history.max_scan_messages:
-            batch_limit = min(
-                self._history.fetch_batch_size,
-                query.limit - len(collected)
-                if query.channel_id is None
-                else self._history.fetch_batch_size,
-            )
+            batch_limit = min(self._history.fetch_batch_size, query.limit - len(collected))
             response = self._client.fetch(
                 query.principal,
                 query.token,
                 from_seq=next_seq,
                 limit=batch_limit,
                 only_my_recipient=query.only_my_recipient,
+                channels=channels,
             )
             batch = list(response.messages)
             scanned += len(batch)
             next_seq = int(response.next_seq)
-            has_more = bool(response.has_more)
+            has_more = next_seq <= int(response.last_seq)
             for message in batch:
                 if query.channel_id is None or int(message.channel_id) == query.channel_id:
                     collected.append(message)
@@ -125,6 +123,7 @@ class HistoryService:
         collected: list[Any] = []
         scanned = 0
         window_end = end_seq
+        channels = _query_channels(query)
 
         while (
             window_end >= min_seq
@@ -140,6 +139,7 @@ class HistoryService:
                 from_seq=window_start,
                 limit=window_size,
                 only_my_recipient=query.only_my_recipient,
+                channels=channels,
             )
             scanned += window_end - window_start + 1
             batch = [
@@ -222,6 +222,12 @@ def parse_history_query(data: dict[str, Any], history_config: HistoryConfig) -> 
         channel_id=channel_id,
         only_my_recipient=only_my_recipient,
     )
+
+
+def _query_channels(query: HistoryQuery) -> tuple[int, ...]:
+    if query.channel_id is None:
+        return ()
+    return (query.channel_id,)
 
 
 def encode_payload(payload: bytes, config: PayloadConfig) -> dict[str, Any]:
