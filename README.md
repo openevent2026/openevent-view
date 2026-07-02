@@ -24,23 +24,10 @@ in the current Python environment. The `openevent-sdk/` submodule is included
 only for source browsing and API reference; `openevent-view` does not import or
 install the SDK from that submodule automatically.
 
-If `openevent-sdk` is not already installed, install it from the SDK submodule
-before running or testing `openevent-view`:
-
-```bash
-git submodule update --init openevent-sdk
-cd openevent-sdk
-make install
-cd ..
-```
-
-To pass additional pip install arguments, use `INSTALL_ARGS` when installing the
-SDK:
-
-```bash
-cd openevent-sdk
-make install INSTALL_ARGS="--target /opt/openevent-sdk"
-```
+If `openevent-sdk` is missing, install `openevent-sdk>=0.3.0` into the current
+Python environment from your normal package source before running or testing
+`openevent-view`. Do not install it from this repository's `openevent-sdk/`
+submodule; that submodule is only a source reference.
 
 Build the wheel:
 

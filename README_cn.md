@@ -20,21 +20,9 @@
 `PyYAML`。仓库中的 `openevent-sdk/` 子模块只用于查看源码和 API 参考；
 `openevent-view` 不会从该子模块自动导入或安装 SDK。
 
-如果当前环境尚未安装 `openevent-sdk`，先从 SDK 子模块安装：
-
-```bash
-git submodule update --init openevent-sdk
-cd openevent-sdk
-make install
-cd ..
-```
-
-需要传递额外的 `pip install` 参数时，通过 SDK 子模块的 `INSTALL_ARGS` 指定：
-
-```bash
-cd openevent-sdk
-make install INSTALL_ARGS="--target /opt/openevent-sdk"
-```
+如果当前环境尚未安装 `openevent-sdk`，请从常规包来源把
+`openevent-sdk>=0.3.0` 安装到当前 Python 环境后再运行或测试
+`openevent-view`。不要从本仓库的 `openevent-sdk/` 子模块安装；该子模块只作为源码参考。
 
 构建 wheel：
 
