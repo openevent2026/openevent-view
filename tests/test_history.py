@@ -116,6 +116,46 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual([item["seq"] for item in result["messages"]], [3, 1])
         self.assertTrue(all(call[3] == (100,) for call in client.fetch_calls))
 
+    def test_desc_query_can_continue_after_sparse_empty_scan_window(self):
+        client = FakeClient(
+            [
+                FakeMessage(85, 850, 100, 1, [], b'{"n":85}'),
+                FakeMessage(100, 1000, 200, 1, [], b'{"n":100}'),
+            ]
+        )
+        service = HistoryService(
+            client,
+            HistoryConfig(default_limit=2, max_limit=1000, fetch_batch_size=10, max_scan_messages=10),
+            PayloadConfig(),
+        )
+        result = service.query(HistoryQuery(1, "tok", None, 2, "desc", 100, False))
+        self.assertEqual(result["messages"], [])
+        self.assertEqual(result["next_cursor"], "91")
+        self.assertTrue(result["has_more"])
+
+        next_result = service.query(HistoryQuery(1, "tok", int(result["next_cursor"]), 2, "desc", 100, False))
+        self.assertEqual([item["seq"] for item in next_result["messages"]], [85])
+        self.assertIsNone(next_result["next_cursor"])
+        self.assertFalse(next_result["has_more"])
+
+    def test_desc_query_does_not_report_more_after_history_start(self):
+        client = FakeClient(
+            [
+                FakeMessage(1, 10, 100, 1, [], b'{"n":1}'),
+                FakeMessage(2, 20, 200, 1, [], b'{"n":2}'),
+                FakeMessage(3, 30, 200, 1, [], b'{"n":3}'),
+            ]
+        )
+        service = HistoryService(
+            client,
+            HistoryConfig(default_limit=5, max_limit=1000, fetch_batch_size=10, max_scan_messages=10),
+            PayloadConfig(),
+        )
+        result = service.query(HistoryQuery(1, "tok", None, 5, "desc", 100, False))
+        self.assertEqual([item["seq"] for item in result["messages"]], [1])
+        self.assertIsNone(result["next_cursor"])
+        self.assertFalse(result["has_more"])
+
     def test_asc_query_uses_last_seq_for_more(self):
         client = FakeClient(
             [

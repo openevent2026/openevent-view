@@ -156,10 +156,17 @@ class HistoryService:
             if not batch and window_start == min_seq:
                 break
 
-        next_cursor = str(int(collected[-1].seq)) if collected else None
-        has_more = bool(next_cursor and int(next_cursor) > min_seq)
-        if scanned >= self._history.max_scan_messages and window_end >= min_seq:
+        page_full = len(collected) >= query.limit
+        scan_exhausted = scanned >= self._history.max_scan_messages and window_end >= min_seq
+        if page_full:
+            next_cursor = str(int(collected[-1].seq))
+            has_more = int(next_cursor) > min_seq
+        elif scan_exhausted:
+            next_cursor = str(window_end + 1)
             has_more = True
+        else:
+            next_cursor = None
+            has_more = False
 
         return {
             "messages": self._messages_to_dicts(query, collected),

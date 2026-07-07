@@ -169,7 +169,7 @@ button:disabled {
 
 .message-summary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(90px, auto)) minmax(180px, 1fr);
+  grid-template-columns: repeat(5, minmax(90px, auto)) 32px;
   gap: 8px 12px;
   padding: 12px 14px;
   border-bottom: 1px solid var(--line);
@@ -192,6 +192,50 @@ button:disabled {
   display: block;
   overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
+}
+
+.message-actions {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.copy-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  padding: 0;
+  border-color: var(--line-strong);
+  background: #fff;
+  color: var(--ink);
+}
+
+.copy-button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.copy-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--code-bg);
+}
+
+.copy-button.is-copied {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.copy-button.is-failed {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .payload-panel {
@@ -279,6 +323,11 @@ button:disabled {
   }
 
   .message-summary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr)) 32px;
+  }
+
+  .message-actions {
+    grid-column: auto;
+    justify-content: flex-end;
   }
 }

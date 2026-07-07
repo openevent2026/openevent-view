@@ -53,7 +53,7 @@ async function fetchMessages(query, append) {
     }
     nextCursor = body.next_cursor || null;
     nextButton.disabled = !body.has_more || !nextCursor;
-    renderMessages(body.messages || [], append);
+    renderMessages(body.messages || [], append, Boolean(body.has_more));
     const count = body.messages ? body.messages.length : 0;
     resultMeta.textContent = `${append ? "Appended" : "Returned"} ${count} message${count === 1 ? "" : "s"}, scanned ${body.scanned || 0}, more available: ${body.has_more ? "yes" : "no"}`;
     statusText.textContent = "Ready";
@@ -72,12 +72,14 @@ function setBusy(isBusy) {
   statusText.textContent = isBusy ? "Loading" : statusText.textContent;
 }
 
-function renderMessages(messages, append) {
+function renderMessages(messages, append, hasMore) {
   if (!append) {
     messageList.innerHTML = "";
   }
   if (!messages.length && !append) {
-    messageList.innerHTML = '<div class="empty-state">No visible messages found.</div>';
+    messageList.innerHTML = hasMore
+      ? '<div class="empty-state">No visible messages in this scan window. Use Next Page to scan older history.</div>'
+      : '<div class="empty-state">No visible messages found.</div>';
     return;
   }
   for (const message of messages) {
@@ -121,7 +123,81 @@ function renderSummary(message) {
     field.querySelector(".field-value").textContent = String(value);
     summary.appendChild(field);
   }
+  summary.appendChild(renderMessageActions(message));
   return summary;
+}
+
+function renderMessageActions(message) {
+  const actions = document.createElement("div");
+  actions.className = "message-actions";
+  const copyButton = document.createElement("button");
+  copyButton.className = "copy-button";
+  copyButton.type = "button";
+  copyButton.title = "Copy message JSON";
+  copyButton.setAttribute("aria-label", "Copy message JSON");
+  copyButton.innerHTML = `
+    <svg aria-hidden="true" focusable="false" viewBox="0 0 24 24">
+      <rect x="9" y="9" width="10" height="10" rx="2"></rect>
+      <path d="M5 15V7a2 2 0 0 1 2-2h8"></path>
+    </svg>
+  `;
+  copyButton.addEventListener("click", async () => {
+    await copyMessageJson(message, copyButton);
+  });
+  actions.appendChild(copyButton);
+  return actions;
+}
+
+async function copyMessageJson(message, button) {
+  button.disabled = true;
+  button.classList.remove("is-copied", "is-failed");
+  try {
+    await copyText(JSON.stringify(message, null, 2));
+    button.classList.add("is-copied");
+    button.title = "Copied";
+    button.setAttribute("aria-label", "Copied");
+    statusText.textContent = "Copied";
+    setTimeout(() => {
+      button.classList.remove("is-copied");
+      button.title = "Copy message JSON";
+      button.setAttribute("aria-label", "Copy message JSON");
+      button.disabled = false;
+    }, 1200);
+  } catch (error) {
+    button.classList.add("is-failed");
+    button.title = "Copy failed";
+    button.setAttribute("aria-label", "Copy failed");
+    statusText.textContent = "Copy failed";
+    setTimeout(() => {
+      button.classList.remove("is-failed");
+      button.title = "Copy message JSON";
+      button.setAttribute("aria-label", "Copy message JSON");
+      button.disabled = false;
+    }, 1600);
+  }
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "-1000px";
+  textarea.style.left = "-1000px";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  try {
+    if (!document.execCommand("copy")) {
+      throw new Error("copy command failed");
+    }
+  } finally {
+    textarea.remove();
+  }
 }
 
 function renderPayload(payload) {
