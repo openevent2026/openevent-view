@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,11 +16,16 @@ class ConfigError(ValueError):
 class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 8080
+    request_timeout_seconds: float = 10.0
+    max_request_body_bytes: int = 65536
 
 
 @dataclass(frozen=True)
 class OpenEventConfig:
     target: str = "127.0.0.1:9527"
+    rpc_timeout_seconds: float = 10.0
+    channel_cache_size: int = 4096
+    channel_lookup_workers: int = 8
 
 
 @dataclass(frozen=True)
@@ -27,7 +33,6 @@ class HistoryConfig:
     default_limit: int = 100
     max_limit: int = 1000
     fetch_batch_size: int = 1000
-    max_scan_messages: int = 10000
     default_order: str = "desc"
 
 
@@ -79,10 +84,6 @@ def parse_config(raw: Any) -> ViewConfig:
             history_raw.get("fetch_batch_size", HistoryConfig.fetch_batch_size),
             "history.fetch_batch_size",
         ),
-        max_scan_messages=_positive_int(
-            history_raw.get("max_scan_messages", HistoryConfig.max_scan_messages),
-            "history.max_scan_messages",
-        ),
         default_order=_order(
             history_raw.get("default_order", HistoryConfig.default_order),
             "history.default_order",
@@ -95,17 +96,56 @@ def parse_config(raw: Any) -> ViewConfig:
     if history.fetch_batch_size > 1000:
         raise ConfigError("history.fetch_batch_size must be <= 1000")
 
+    channel_lookup_workers = _positive_int(
+        openevent_raw.get(
+            "channel_lookup_workers",
+            OpenEventConfig.channel_lookup_workers,
+        ),
+        "openevent.channel_lookup_workers",
+    )
+    if channel_lookup_workers > 64:
+        raise ConfigError("openevent.channel_lookup_workers must be <= 64")
+
     return ViewConfig(
         version=version,
         server=ServerConfig(
             host=_str(server_raw.get("host", ServerConfig.host), "server.host"),
             port=_port(server_raw.get("port", ServerConfig.port), "server.port"),
+            request_timeout_seconds=_positive_number(
+                server_raw.get(
+                    "request_timeout_seconds",
+                    ServerConfig.request_timeout_seconds,
+                ),
+                "server.request_timeout_seconds",
+            ),
+            max_request_body_bytes=_positive_int(
+                server_raw.get(
+                    "max_request_body_bytes",
+                    ServerConfig.max_request_body_bytes,
+                ),
+                "server.max_request_body_bytes",
+            ),
         ),
         openevent=OpenEventConfig(
             target=_str(
                 openevent_raw.get("target", OpenEventConfig.target),
                 "openevent.target",
             ),
+            rpc_timeout_seconds=_positive_number(
+                openevent_raw.get(
+                    "rpc_timeout_seconds",
+                    OpenEventConfig.rpc_timeout_seconds,
+                ),
+                "openevent.rpc_timeout_seconds",
+            ),
+            channel_cache_size=_positive_int(
+                openevent_raw.get(
+                    "channel_cache_size",
+                    OpenEventConfig.channel_cache_size,
+                ),
+                "openevent.channel_cache_size",
+            ),
+            channel_lookup_workers=channel_lookup_workers,
         ),
         history=history,
         payload=PayloadConfig(
@@ -141,6 +181,17 @@ def _positive_int(value: Any, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ConfigError(f"{field} must be a positive integer")
     return value
+
+
+def _positive_number(value: Any, field: str) -> float:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ConfigError(f"{field} must be a positive number")
+    return float(value)
 
 
 def _port(value: Any, field: str) -> int:

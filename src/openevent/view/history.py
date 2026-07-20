@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -10,6 +13,10 @@ from .config import HistoryConfig, PayloadConfig
 
 class RequestError(ValueError):
     code = "INVALID_ARGUMENT"
+
+
+class UpstreamProtocolError(RuntimeError):
+    code = "BAD_GATEWAY"
 
 
 class OpenEventClientProtocol(Protocol):
@@ -48,10 +55,22 @@ class HistoryService:
         client: OpenEventClientProtocol,
         history_config: HistoryConfig,
         payload_config: PayloadConfig,
+        channel_cache_size: int = 4096,
+        channel_lookup_workers: int = 8,
     ):
         self._client = client
         self._history = history_config
         self._payload = payload_config
+        self._channel_cache_size = channel_cache_size
+        self._channel_names: OrderedDict[tuple[int, int], str] = OrderedDict()
+        self._channel_names_lock = threading.Lock()
+        self._channel_executor = ThreadPoolExecutor(
+            max_workers=channel_lookup_workers,
+            thread_name_prefix="openevent-view-channel",
+        )
+
+    def close(self) -> None:
+        self._channel_executor.shutdown(wait=True, cancel_futures=True)
 
     def query(self, query: HistoryQuery) -> dict[str, Any]:
         if query.order == "asc":
@@ -61,40 +80,40 @@ class HistoryService:
     def _query_asc(self, query: HistoryQuery) -> dict[str, Any]:
         from_seq = query.cursor or 1
         collected: list[Any] = []
-        scanned = 0
         next_seq = from_seq
         has_more = False
         channels = _query_channels(query)
 
-        while len(collected) < query.limit and scanned < self._history.max_scan_messages:
+        while len(collected) < query.limit:
+            request_from = next_seq
             batch_limit = min(self._history.fetch_batch_size, query.limit - len(collected))
             response = self._client.fetch(
                 query.principal,
                 query.token,
-                from_seq=next_seq,
+                from_seq=request_from,
                 limit=batch_limit,
                 only_my_recipient=query.only_my_recipient,
                 channels=channels,
             )
             batch = list(response.messages)
-            scanned += len(batch)
-            next_seq = int(response.next_seq)
-            has_more = next_seq <= int(response.last_seq)
+            response_next_seq = int(response.next_seq)
+            response_last_seq = int(response.last_seq)
+            if request_from <= response_last_seq and response_next_seq <= request_from:
+                raise UpstreamProtocolError("OpenEvent Fetch next_seq did not advance")
+
+            next_seq = response_next_seq
+            has_more = next_seq <= response_last_seq
             for message in batch:
                 if query.channel_id is None or int(message.channel_id) == query.channel_id:
                     collected.append(message)
                     if len(collected) >= query.limit:
                         break
-            if not has_more or not batch:
+            if not has_more:
                 break
 
-        has_more = has_more or scanned >= self._history.max_scan_messages
         return {
             "messages": self._messages_to_dicts(query, collected),
             "next_cursor": str(next_seq) if has_more else None,
-            "has_more": has_more,
-            "order": "asc",
-            "scanned": scanned,
         }
 
     def _query_desc(self, query: HistoryQuery) -> dict[str, Any]:
@@ -105,9 +124,6 @@ class HistoryService:
             return {
                 "messages": [],
                 "next_cursor": None,
-                "has_more": False,
-                "order": "desc",
-                "scanned": 0,
             }
 
         end_seq = max_seq if query.cursor is None else min(query.cursor - 1, max_seq)
@@ -115,66 +131,71 @@ class HistoryService:
             return {
                 "messages": [],
                 "next_cursor": None,
-                "has_more": False,
-                "order": "desc",
-                "scanned": 0,
             }
 
         collected: list[Any] = []
-        scanned = 0
         window_end = end_seq
         channels = _query_channels(query)
 
-        while (
-            window_end >= min_seq
-            and len(collected) < query.limit
-            and scanned < self._history.max_scan_messages
-        ):
-            remaining_scan = self._history.max_scan_messages - scanned
-            window_size = min(self._history.fetch_batch_size, remaining_scan)
+        while window_end >= min_seq and len(collected) < query.limit:
+            remaining = query.limit - len(collected)
+            window_size = min(self._history.fetch_batch_size, remaining)
             window_start = max(min_seq, window_end - window_size + 1)
-            response = self._client.fetch(
-                query.principal,
-                query.token,
-                from_seq=window_start,
-                limit=window_size,
-                only_my_recipient=query.only_my_recipient,
-                channels=channels,
+            window_messages = self._fetch_desc_window(
+                query,
+                channels,
+                window_start,
+                window_end,
+                remaining,
             )
-            scanned += window_end - window_start + 1
-            batch = [
-                message
-                for message in response.messages
-                if window_start <= int(message.seq) <= window_end
-            ]
-            for message in reversed(batch):
+            for message in sorted(window_messages, key=lambda item: int(item.seq), reverse=True):
                 if query.channel_id is None or int(message.channel_id) == query.channel_id:
                     collected.append(message)
                     if len(collected) >= query.limit:
                         break
             window_end = window_start - 1
-            if not batch and window_start == min_seq:
-                break
 
-        page_full = len(collected) >= query.limit
-        scan_exhausted = scanned >= self._history.max_scan_messages and window_end >= min_seq
-        if page_full:
+        if len(collected) >= query.limit:
             next_cursor = str(int(collected[-1].seq))
-            has_more = int(next_cursor) > min_seq
-        elif scan_exhausted:
-            next_cursor = str(window_end + 1)
-            has_more = True
+            if int(next_cursor) <= min_seq:
+                next_cursor = None
         else:
             next_cursor = None
-            has_more = False
 
         return {
             "messages": self._messages_to_dicts(query, collected),
-            "next_cursor": next_cursor if has_more else None,
-            "has_more": has_more,
-            "order": "desc",
-            "scanned": scanned,
+            "next_cursor": next_cursor,
         }
+
+    def _fetch_desc_window(
+        self,
+        query: HistoryQuery,
+        channels: tuple[int, ...],
+        window_start: int,
+        window_end: int,
+        remaining: int,
+    ) -> list[Any]:
+        fetch_from = window_start
+        messages: list[Any] = []
+        while fetch_from <= window_end:
+            response = self._client.fetch(
+                query.principal,
+                query.token,
+                from_seq=fetch_from,
+                limit=min(remaining, window_end - fetch_from + 1),
+                only_my_recipient=query.only_my_recipient,
+                channels=channels,
+            )
+            response_next_seq = int(response.next_seq)
+            if response_next_seq <= fetch_from:
+                raise UpstreamProtocolError("OpenEvent Fetch next_seq did not advance")
+            messages.extend(
+                message
+                for message in response.messages
+                if fetch_from <= int(message.seq) <= window_end
+            )
+            fetch_from = response_next_seq
+        return messages
 
     def _messages_to_dicts(self, query: HistoryQuery, messages: list[Any]) -> list[dict[str, Any]]:
         channel_names = self._load_channel_names(query.principal, query.token, messages)
@@ -186,7 +207,7 @@ class HistoryService:
             "seq": int(message.seq),
             "ts_ms": int(message.ts_ms),
             "channel_id": channel_id,
-            "channel_name": channel_names.get(channel_id),
+            "channel_name": channel_names[channel_id],
             "principal": int(message.principal),
             "recipients": [int(item) for item in message.recipients],
             "payload": encode_payload(bytes(message.payload), self._payload),
@@ -195,22 +216,59 @@ class HistoryService:
     def _load_channel_names(self, principal: int, token: str, messages: list[Any]) -> dict[int, str]:
         names: dict[int, str] = {}
         channel_ids = sorted({int(message.channel_id) for message in messages})
+        missing: list[int] = []
         for channel_id in channel_ids:
-            try:
-                response = self._client.get_channel(principal, token, channel_id)
-            except Exception:
-                continue
-            channel = getattr(response, "channel", None)
-            name = getattr(channel, "name", None)
-            if name:
-                names[channel_id] = str(name)
+            cached = self._get_cached_channel_name(principal, channel_id)
+            if cached is None:
+                missing.append(channel_id)
+            else:
+                names[channel_id] = cached
+
+        if missing:
+            futures = {
+                channel_id: self._channel_executor.submit(
+                    self._get_channel_name,
+                    principal,
+                    token,
+                    channel_id,
+                )
+                for channel_id in missing
+            }
+            for channel_id, future in futures.items():
+                name = future.result()
+                names[channel_id] = name
+                self._cache_channel_name(principal, channel_id, name)
         return names
+
+    def _get_channel_name(self, principal: int, token: str, channel_id: int) -> str:
+        response = self._client.get_channel(principal, token, channel_id)
+        channel = getattr(response, "channel", None)
+        name = getattr(channel, "name", None)
+        if not name:
+            raise UpstreamProtocolError("OpenEvent GetChannel returned an empty channel name")
+        return str(name)
+
+    def _get_cached_channel_name(self, principal: int, channel_id: int) -> str | None:
+        key = (principal, channel_id)
+        with self._channel_names_lock:
+            name = self._channel_names.get(key)
+            if name is not None:
+                self._channel_names.move_to_end(key)
+            return name
+
+    def _cache_channel_name(self, principal: int, channel_id: int, name: str) -> None:
+        key = (principal, channel_id)
+        with self._channel_names_lock:
+            self._channel_names[key] = name
+            self._channel_names.move_to_end(key)
+            while len(self._channel_names) > self._channel_cache_size:
+                self._channel_names.popitem(last=False)
 
 
 def parse_history_query(data: dict[str, Any], history_config: HistoryConfig) -> HistoryQuery:
     principal = _required_uint64(data.get("principal"), "principal")
     token = _required_str(data.get("token"), "token")
-    cursor = _optional_uint64(data.get("cursor"), "cursor")
+    cursor = _optional_positive_uint64(data.get("cursor"), "cursor")
     raw_limit = _optional_uint64(data.get("limit"), "limit")
     limit = raw_limit if raw_limit is not None else history_config.default_limit
     if limit < 1 or limit > history_config.max_limit:
@@ -302,6 +360,13 @@ def _optional_uint64(value: Any, field: str) -> int | None:
         raise RequestError(f"{field} must be an unsigned integer")
     if parsed > 2**64 - 1:
         raise RequestError(f"{field} must fit uint64")
+    return parsed
+
+
+def _optional_positive_uint64(value: Any, field: str) -> int | None:
+    parsed = _optional_uint64(value, field)
+    if parsed == 0:
+        raise RequestError(f"{field} must be a positive integer")
     return parsed
 
 

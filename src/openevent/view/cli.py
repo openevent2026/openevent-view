@@ -5,6 +5,7 @@ import logging
 
 from .config import load_config
 from .history import HistoryService
+from .rpc import create_rpc_client
 from .server import create_server
 
 
@@ -22,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
         from openevent.sdk import OpenEventClient
     except ImportError as exc:
         raise SystemExit(
-            "failed to import openevent-sdk; install openevent-sdk>=0.3.0 "
+            "failed to import openevent-sdk; install openevent-sdk>=0.4.0 "
             "before starting openevent-view"
         ) from exc
 
@@ -30,10 +31,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.host or args.port:
         config = _override_server(config, args.host, args.port)
 
+    client = create_rpc_client(
+        OpenEventClient,
+        config.openevent.target,
+        config.openevent.rpc_timeout_seconds,
+    )
     history_service = HistoryService(
-        OpenEventClient(config.openevent.target),
+        client,
         config.history,
         config.payload,
+        channel_cache_size=config.openevent.channel_cache_size,
+        channel_lookup_workers=config.openevent.channel_lookup_workers,
     )
     server = create_server(config, history_service)
     address = f"http://{config.server.host}:{config.server.port}/"
@@ -44,6 +52,8 @@ def main(argv: list[str] | None = None) -> int:
         logging.getLogger(__name__).info("shutdown requested")
     finally:
         server.server_close()
+        history_service.close()
+        client.channel.close()
     return 0
 
 

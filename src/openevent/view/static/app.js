@@ -52,10 +52,10 @@ async function fetchMessages(query, append) {
       throw new Error(body.error?.message || `HTTP ${response.status}`);
     }
     nextCursor = body.next_cursor || null;
-    nextButton.disabled = !body.has_more || !nextCursor;
-    renderMessages(body.messages || [], append, Boolean(body.has_more));
+    nextButton.disabled = !nextCursor;
+    renderMessages(body.messages || [], append, Boolean(nextCursor));
     const count = body.messages ? body.messages.length : 0;
-    resultMeta.textContent = `${append ? "Appended" : "Returned"} ${count} message${count === 1 ? "" : "s"}, scanned ${body.scanned || 0}, more available: ${body.has_more ? "yes" : "no"}`;
+    resultMeta.textContent = `${append ? "Appended" : "Returned"} ${count} message${count === 1 ? "" : "s"}, more available: ${nextCursor ? "yes" : "no"}`;
     statusText.textContent = "Ready";
   } catch (error) {
     renderError(error.message || String(error), append);

@@ -19,12 +19,12 @@ server storage directly.
 
 ## Run
 
-`openevent-view` depends on `openevent-sdk>=0.3.0` and `PyYAML` being installed
+`openevent-view` depends on `openevent-sdk>=0.4.0` and `PyYAML` being installed
 in the current Python environment. The `openevent-sdk/` submodule is included
 only for source browsing and API reference; `openevent-view` does not import or
 install the SDK from that submodule automatically.
 
-If `openevent-sdk` is missing, install `openevent-sdk>=0.3.0` into the current
+If `openevent-sdk` is missing, install `openevent-sdk>=0.4.0` into the current
 Python environment from your normal package source before running or testing
 `openevent-view`. Do not install it from this repository's `openevent-sdk/`
 submodule; that submodule is only a source reference.
@@ -83,15 +83,19 @@ version: v1
 server:
   host: 127.0.0.1
   port: 8080
+  request_timeout_seconds: 10
+  max_request_body_bytes: 65536
 
 openevent:
   target: 127.0.0.1:9527
+  rpc_timeout_seconds: 10
+  channel_cache_size: 4096
+  channel_lookup_workers: 8
 
 history:
   default_limit: 100
   max_limit: 1000
   fetch_batch_size: 1000
-  max_scan_messages: 10000
   default_order: desc
 
 payload:
@@ -116,15 +120,13 @@ Content-Type: application/json
 }
 ```
 
-When `cursor` is empty, the API returns the newest page. Use `next_cursor` from
-the response to load older messages.
+When `cursor` is empty, the API returns the newest page. A provided cursor must
+be a positive integer. Use `next_cursor` from the response to load older
+messages.
 
 ```json
 {
   "messages": [],
-  "next_cursor": null,
-  "has_more": false,
-  "order": "desc",
-  "scanned": 0
+  "next_cursor": null
 }
 ```

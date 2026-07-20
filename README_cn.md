@@ -16,12 +16,12 @@
 
 ## 运行
 
-`openevent-view` 依赖当前 Python 环境中已安装的 `openevent-sdk>=0.3.0` 和
+`openevent-view` 依赖当前 Python 环境中已安装的 `openevent-sdk>=0.4.0` 和
 `PyYAML`。仓库中的 `openevent-sdk/` 子模块只用于查看源码和 API 参考；
 `openevent-view` 不会从该子模块自动导入或安装 SDK。
 
 如果当前环境尚未安装 `openevent-sdk`，请从常规包来源把
-`openevent-sdk>=0.3.0` 安装到当前 Python 环境后再运行或测试
+`openevent-sdk>=0.4.0` 安装到当前 Python 环境后再运行或测试
 `openevent-view`。不要从本仓库的 `openevent-sdk/` 子模块安装；该子模块只作为源码参考。
 
 构建 wheel：
@@ -76,15 +76,19 @@ version: v1
 server:
   host: 127.0.0.1
   port: 8080
+  request_timeout_seconds: 10
+  max_request_body_bytes: 65536
 
 openevent:
   target: 127.0.0.1:9527
+  rpc_timeout_seconds: 10
+  channel_cache_size: 4096
+  channel_lookup_workers: 8
 
 history:
   default_limit: 100
   max_limit: 1000
   fetch_batch_size: 1000
-  max_scan_messages: 10000
   default_order: desc
 
 payload:
@@ -109,14 +113,11 @@ Content-Type: application/json
 }
 ```
 
-`cursor` 为空时返回最新一页；响应中的 `next_cursor` 可用于加载更早消息。
+`cursor` 为空时返回最新一页；非空时必须为正整数。响应中的 `next_cursor` 可用于加载更早消息。
 
 ```json
 {
   "messages": [],
-  "next_cursor": null,
-  "has_more": false,
-  "order": "desc",
-  "scanned": 0
+  "next_cursor": null
 }
 ```

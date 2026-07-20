@@ -19,20 +19,31 @@ cd "$ROOT_DIR"
 
 "$PYTHON_BIN" - <<'PY'
 import importlib.util
+import importlib.metadata
 import sys
 
 requirements = [
     ("yaml", "PyYAML"),
     ("grpc", "grpcio"),
-    ("openevent.sdk", "openevent-sdk>=0.3.0"),
+    ("openevent.sdk", "openevent-sdk>=0.4.0"),
 ]
 missing = [package for module, package in requirements if importlib.util.find_spec(module) is None]
 if missing:
     print("missing Python dependencies in the current environment:", ", ".join(missing), file=sys.stderr)
     print(
-        "install them first, for example: git submodule update --init openevent-sdk && (cd openevent-sdk && make install)",
+        "install them from the normal package source before running tests",
         file=sys.stderr,
     )
+    sys.exit(2)
+
+try:
+    version = importlib.metadata.version("openevent-sdk")
+except importlib.metadata.PackageNotFoundError:
+    print("missing Python dependency: openevent-sdk>=0.4.0", file=sys.stderr)
+    sys.exit(2)
+parts = tuple(int(part) for part in version.split(".")[:3] if part.isdigit())
+if parts < (0, 4, 0):
+    print(f"openevent-sdk>=0.4.0 is required, found {version}", file=sys.stderr)
     sys.exit(2)
 PY
 

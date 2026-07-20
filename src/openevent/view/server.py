@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
@@ -11,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 import grpc
 
 from .config import ViewConfig
-from .history import HistoryService, RequestError, parse_history_query
+from .history import HistoryService, RequestError, UpstreamProtocolError, parse_history_query
 
 
 LOGGER = logging.getLogger(__name__)
@@ -36,6 +37,11 @@ class ViewHTTPServer(ThreadingHTTPServer):
         super().__init__(server_address, handler_class)
         self.config = config
         self.history_service = history_service
+
+    def get_request(self):
+        request, client_address = super().get_request()
+        request.settimeout(self.config.server.request_timeout_seconds)
+        return request, client_address
 
 
 def make_handler() -> type[BaseHTTPRequestHandler]:
@@ -92,6 +98,10 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
                 length = int(content_length)
             except ValueError as exc:
                 raise JsonResponseError(400, "INVALID_ARGUMENT", "invalid Content-Length") from exc
+            if length < 0:
+                raise JsonResponseError(400, "INVALID_ARGUMENT", "Content-Length must not be negative")
+            if length > self.server.config.server.max_request_body_bytes:
+                raise JsonResponseError(413, "REQUEST_TOO_LARGE", "request body is too large")
             raw = self.rfile.read(length)
             if not raw:
                 return {}
@@ -107,8 +117,14 @@ def make_handler() -> type[BaseHTTPRequestHandler]:
             if isinstance(exc, JsonResponseError):
                 self._send_error_json(exc.status, exc.code, exc.message)
                 return
+            if isinstance(exc, (socket.timeout, TimeoutError)):
+                self._send_error_json(408, "REQUEST_TIMEOUT", "request timed out")
+                return
             if isinstance(exc, RequestError):
                 self._send_error_json(400, exc.code, str(exc))
+                return
+            if isinstance(exc, UpstreamProtocolError):
+                self._send_error_json(502, exc.code, str(exc))
                 return
             if isinstance(exc, grpc.RpcError):
                 status, code = _grpc_to_http(exc)
@@ -192,6 +208,7 @@ def _grpc_to_http(exc: grpc.RpcError) -> tuple[int, str]:
         grpc.StatusCode.PERMISSION_DENIED: (403, "PERMISSION_DENIED"),
         grpc.StatusCode.NOT_FOUND: (404, "NOT_FOUND"),
         grpc.StatusCode.UNAVAILABLE: (503, "UNAVAILABLE"),
+        grpc.StatusCode.DEADLINE_EXCEEDED: (504, "DEADLINE_EXCEEDED"),
         grpc.StatusCode.INVALID_ARGUMENT: (400, "INVALID_ARGUMENT"),
         grpc.StatusCode.RESOURCE_EXHAUSTED: (400, "RESOURCE_EXHAUSTED"),
     }
