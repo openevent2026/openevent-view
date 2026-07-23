@@ -25,7 +25,7 @@ import sys
 requirements = [
     ("yaml", "PyYAML"),
     ("grpc", "grpcio"),
-    ("openevent.sdk", "openevent-sdk>=0.4.0"),
+    ("openevent.sdk", "openevent-sdk>=0.4.1"),
 ]
 missing = [package for module, package in requirements if importlib.util.find_spec(module) is None]
 if missing:
@@ -39,11 +39,11 @@ if missing:
 try:
     version = importlib.metadata.version("openevent-sdk")
 except importlib.metadata.PackageNotFoundError:
-    print("missing Python dependency: openevent-sdk>=0.4.0", file=sys.stderr)
+    print("missing Python dependency: openevent-sdk>=0.4.1", file=sys.stderr)
     sys.exit(2)
 parts = tuple(int(part) for part in version.split(".")[:3] if part.isdigit())
-if parts < (0, 4, 0):
-    print(f"openevent-sdk>=0.4.0 is required, found {version}", file=sys.stderr)
+if parts < (0, 4, 1):
+    print(f"openevent-sdk>=0.4.1 is required, found {version}", file=sys.stderr)
     sys.exit(2)
 PY
 

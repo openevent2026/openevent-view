@@ -5,7 +5,6 @@ import logging
 
 from .config import load_config
 from .history import HistoryService
-from .rpc import create_rpc_client
 from .server import create_server
 
 
@@ -23,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
         from openevent.sdk import OpenEventClient
     except ImportError as exc:
         raise SystemExit(
-            "failed to import openevent-sdk; install openevent-sdk>=0.4.0 "
+            "failed to import openevent-sdk; install openevent-sdk>=0.4.1 "
             "before starting openevent-view"
         ) from exc
 
@@ -31,10 +30,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.host or args.port:
         config = _override_server(config, args.host, args.port)
 
-    client = create_rpc_client(
-        OpenEventClient,
+    client = OpenEventClient(
         config.openevent.target,
-        config.openevent.rpc_timeout_seconds,
+        timeout=config.openevent.rpc_timeout_seconds,
     )
     history_service = HistoryService(
         client,
