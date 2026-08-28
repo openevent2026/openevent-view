@@ -8,21 +8,19 @@
 ## 功能
 
 - 内置前端页面：`GET /`
-- 历史消息 API：`GET/POST /v1/messages`
-- 默认倒序显示，最新消息在前
+- 历史消息 API：`POST /v1/messages`
+- 按倒序显示，最新消息在前
 - 前端不暴露 `from_seq` 和 `limit` 输入，分页由 `cursor` 自动维护
 - 可选按 `channel_id` 和 `only_my_recipient` 过滤
-- 每条消息展示 OpenEvent 顶层字段，并将 `payload` 按 JSON 树展开；非 JSON payload 按 UTF-8 文本或 base64 显示
+- 每条消息展示 OpenEvent 顶层字段。不超过 16 KiB 的 payload 展示解析后的 JSON、UTF-8 文本或 base64；更大的 payload 只显示预览，并可在单独页面查看完整内容
 
 ## 运行
 
-`openevent-view` 依赖当前 Python 环境中已安装的 `openevent-sdk>=0.4.1` 和
-`PyYAML`。仓库中的 `openevent-sdk/` 子模块只用于查看源码和 API 参考；
-`openevent-view` 不会从该子模块自动导入或安装 SDK。
+`openevent-view` 依赖当前 Python 环境中已安装的 `openevent-sdk>=0.6.0`、
+`PyYAML` 和 `orjson>=3.10`。
 
 如果当前环境尚未安装 `openevent-sdk`，请从常规包来源把
-`openevent-sdk>=0.4.1` 安装到当前 Python 环境后再运行或测试
-`openevent-view`。不要从本仓库的 `openevent-sdk/` 子模块安装；该子模块只作为源码参考。
+`openevent-sdk>=0.6.0` 安装到当前 Python 环境后再运行或测试 `openevent-view`。
 
 构建 wheel：
 
@@ -40,12 +38,6 @@ dist/openevent_view-0.1.0-py3-none-any.whl
 
 ```bash
 make install
-```
-
-需要指定安装路径时，通过 `INSTALL_ARGS` 传递 `pip install` 参数：
-
-```bash
-make install INSTALL_ARGS="--target /opt/openevent-view"
 ```
 
 开发方式启动：
@@ -89,12 +81,6 @@ history:
   default_limit: 100
   max_limit: 1000
   fetch_batch_size: 1000
-  default_order: desc
-
-payload:
-  parse_json: true
-  include_text: true
-  text_max_bytes: 65536
 ```
 
 ## API
@@ -104,16 +90,31 @@ POST /v1/messages
 Content-Type: application/json
 
 {
-  "principal": 10001,
+  "principal": "10001",
   "token": "tok_xxx",
   "cursor": null,
-  "order": "desc",
-  "channel_id": 10001,
+  "channel_id": "10001",
   "only_my_recipient": false
 }
 ```
 
-`cursor` 为空时返回最新一页；非空时必须为正整数。响应中的 `next_cursor` 可用于加载更早消息。
+`cursor` 省略或为 `null` 时返回最新一页；非空时原样传回响应中的 `next_cursor` 对象以加载更早消息。
+`only_my_recipient` 省略时为 `false`。每次查询都会先用本次 `principal/token` 调用 `GetStatus`，因此错误凭据返回
+`401`，即使游标已经位于历史边界也不会返回空页。凭据只接受 JSON body，不提供带鉴权的 GET 变体。
+
+完整 Payload 使用只读详情接口：
+
+```http
+POST /v1/messages/123/payload
+Content-Type: application/json
+
+{
+  "principal": "10001",
+  "token": "tok_xxx"
+}
+```
+
+详情页地址是 `GET /message?seq=123`。页面始终在新标签中打开，凭据不会进入 URL 或浏览器存储。
 
 ```json
 {

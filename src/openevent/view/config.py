@@ -33,14 +33,6 @@ class HistoryConfig:
     default_limit: int = 100
     max_limit: int = 1000
     fetch_batch_size: int = 1000
-    default_order: str = "desc"
-
-
-@dataclass(frozen=True)
-class PayloadConfig:
-    parse_json: bool = True
-    include_text: bool = True
-    text_max_bytes: int = 65536
 
 
 @dataclass(frozen=True)
@@ -49,7 +41,6 @@ class ViewConfig:
     server: ServerConfig
     openevent: OpenEventConfig
     history: HistoryConfig
-    payload: PayloadConfig
 
 
 def load_config(path: str | Path | None = None) -> ViewConfig:
@@ -61,32 +52,27 @@ def load_config(path: str | Path | None = None) -> ViewConfig:
 
 
 def parse_config(raw: Any) -> ViewConfig:
-    data = _obj(raw, "config")
-    version = _str(data.get("version", "v1"), "version")
+    data = _object(raw, "config")
+    version = _non_empty_string(data.get("version", "v1"), "version")
     if version != "v1":
         raise ConfigError("version must be v1")
 
-    server_raw = _obj(data.get("server", {}), "server")
-    openevent_raw = _obj(data.get("openevent", {}), "openevent")
-    history_raw = _obj(data.get("history", {}), "history")
-    payload_raw = _obj(data.get("payload", {}), "payload")
+    server_data = _object(data.get("server", {}), "server")
+    openevent_data = _object(data.get("openevent", {}), "openevent")
+    history_data = _object(data.get("history", {}), "history")
 
     history = HistoryConfig(
         default_limit=_positive_int(
-            history_raw.get("default_limit", HistoryConfig.default_limit),
+            history_data.get("default_limit", HistoryConfig.default_limit),
             "history.default_limit",
         ),
         max_limit=_positive_int(
-            history_raw.get("max_limit", HistoryConfig.max_limit),
+            history_data.get("max_limit", HistoryConfig.max_limit),
             "history.max_limit",
         ),
         fetch_batch_size=_positive_int(
-            history_raw.get("fetch_batch_size", HistoryConfig.fetch_batch_size),
+            history_data.get("fetch_batch_size", HistoryConfig.fetch_batch_size),
             "history.fetch_batch_size",
-        ),
-        default_order=_order(
-            history_raw.get("default_order", HistoryConfig.default_order),
-            "history.default_order",
         ),
     )
     if history.default_limit > history.max_limit:
@@ -96,82 +82,65 @@ def parse_config(raw: Any) -> ViewConfig:
     if history.fetch_batch_size > 1000:
         raise ConfigError("history.fetch_batch_size must be <= 1000")
 
-    channel_lookup_workers = _positive_int(
-        openevent_raw.get(
-            "channel_lookup_workers",
-            OpenEventConfig.channel_lookup_workers,
+    workers = _positive_int(
+        openevent_data.get(
+            "channel_lookup_workers", OpenEventConfig.channel_lookup_workers
         ),
         "openevent.channel_lookup_workers",
     )
-    if channel_lookup_workers > 64:
+    if workers > 64:
         raise ConfigError("openevent.channel_lookup_workers must be <= 64")
 
     return ViewConfig(
         version=version,
         server=ServerConfig(
-            host=_str(server_raw.get("host", ServerConfig.host), "server.host"),
-            port=_port(server_raw.get("port", ServerConfig.port), "server.port"),
+            host=_non_empty_string(
+                server_data.get("host", ServerConfig.host), "server.host"
+            ),
+            port=_port(server_data.get("port", ServerConfig.port), "server.port"),
             request_timeout_seconds=_positive_number(
-                server_raw.get(
-                    "request_timeout_seconds",
-                    ServerConfig.request_timeout_seconds,
+                server_data.get(
+                    "request_timeout_seconds", ServerConfig.request_timeout_seconds
                 ),
                 "server.request_timeout_seconds",
             ),
             max_request_body_bytes=_positive_int(
-                server_raw.get(
-                    "max_request_body_bytes",
-                    ServerConfig.max_request_body_bytes,
+                server_data.get(
+                    "max_request_body_bytes", ServerConfig.max_request_body_bytes
                 ),
                 "server.max_request_body_bytes",
             ),
         ),
         openevent=OpenEventConfig(
-            target=_str(
-                openevent_raw.get("target", OpenEventConfig.target),
+            target=_non_empty_string(
+                openevent_data.get("target", OpenEventConfig.target),
                 "openevent.target",
             ),
             rpc_timeout_seconds=_positive_number(
-                openevent_raw.get(
-                    "rpc_timeout_seconds",
-                    OpenEventConfig.rpc_timeout_seconds,
+                openevent_data.get(
+                    "rpc_timeout_seconds", OpenEventConfig.rpc_timeout_seconds
                 ),
                 "openevent.rpc_timeout_seconds",
             ),
             channel_cache_size=_positive_int(
-                openevent_raw.get(
-                    "channel_cache_size",
-                    OpenEventConfig.channel_cache_size,
+                openevent_data.get(
+                    "channel_cache_size", OpenEventConfig.channel_cache_size
                 ),
                 "openevent.channel_cache_size",
             ),
-            channel_lookup_workers=channel_lookup_workers,
+            channel_lookup_workers=workers,
         ),
         history=history,
-        payload=PayloadConfig(
-            parse_json=_bool(
-                payload_raw.get("parse_json", PayloadConfig.parse_json),
-                "payload.parse_json",
-            ),
-            include_text=_bool(
-                payload_raw.get("include_text", PayloadConfig.include_text),
-                "payload.include_text",
-            ),
-            text_max_bytes=_positive_int(
-                payload_raw.get("text_max_bytes", PayloadConfig.text_max_bytes),
-                "payload.text_max_bytes",
-            ),
-        ),
     )
 
 
-def _obj(value: Any, field: str) -> dict[str, Any]:
+def _object(value: Any, field: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ConfigError(f"{field} must be an object")
     return value
 
 
-def _str(value: Any, field: str) -> str:
+def _non_empty_string(value: Any, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise ConfigError(f"{field} must be a non-empty string")
     return value
@@ -199,16 +168,3 @@ def _port(value: Any, field: str) -> int:
     if port > 65535:
         raise ConfigError(f"{field} must be between 1 and 65535")
     return port
-
-
-def _bool(value: Any, field: str) -> bool:
-    if not isinstance(value, bool):
-        raise ConfigError(f"{field} must be a boolean")
-    return value
-
-
-def _order(value: Any, field: str) -> str:
-    value = _str(value, field)
-    if value not in {"asc", "desc"}:
-        raise ConfigError(f"{field} must be asc or desc")
-    return value

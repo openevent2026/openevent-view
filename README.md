@@ -9,25 +9,22 @@ server storage directly.
 ## Features
 
 - Built-in frontend page: `GET /`
-- Historical message API: `GET/POST /v1/messages`
-- Descending order by default, with newest messages first
+- Historical message API: `POST /v1/messages`
+- Descending messages, with newest messages first
 - The frontend does not expose `from_seq` or `limit` inputs; pagination is
   maintained automatically with `cursor`
 - Optional filtering by `channel_id` and `only_my_recipient`
-- Each message shows OpenEvent top-level fields. `payload` is expanded as a JSON
-  tree when possible; non-JSON payloads are shown as UTF-8 text or base64
+- Each message shows OpenEvent top-level fields. Payloads up to 16 KiB are
+  expanded as parsed JSON, UTF-8 text, or base64; larger payloads show a preview
+  and can be opened in a separate full-content page
 
 ## Run
 
-`openevent-view` depends on `openevent-sdk>=0.4.1` and `PyYAML` being installed
-in the current Python environment. The `openevent-sdk/` submodule is included
-only for source browsing and API reference; `openevent-view` does not import or
-install the SDK from that submodule automatically.
+`openevent-view` depends on `openevent-sdk>=0.6.0`, `PyYAML`, and
+`orjson>=3.10` being installed in the current Python environment.
 
-If `openevent-sdk` is missing, install `openevent-sdk>=0.4.1` into the current
-Python environment from your normal package source before running or testing
-`openevent-view`. Do not install it from this repository's `openevent-sdk/`
-submodule; that submodule is only a source reference.
+If `openevent-sdk` is missing, install `openevent-sdk>=0.6.0` from your normal
+package source before running or testing `openevent-view`.
 
 Build the wheel:
 
@@ -45,13 +42,6 @@ Install:
 
 ```bash
 make install
-```
-
-To specify an install location, pass `pip install` arguments through
-`INSTALL_ARGS`:
-
-```bash
-make install INSTALL_ARGS="--target /opt/openevent-view"
 ```
 
 Start in development mode:
@@ -96,12 +86,6 @@ history:
   default_limit: 100
   max_limit: 1000
   fetch_batch_size: 1000
-  default_order: desc
-
-payload:
-  parse_json: true
-  include_text: true
-  text_max_bytes: 65536
 ```
 
 ## API
@@ -111,18 +95,35 @@ POST /v1/messages
 Content-Type: application/json
 
 {
-  "principal": 10001,
+  "principal": "10001",
   "token": "tok_xxx",
   "cursor": null,
-  "order": "desc",
-  "channel_id": 10001,
+  "channel_id": "10001",
   "only_my_recipient": false
 }
 ```
 
-When `cursor` is empty, the API returns the newest page. A provided cursor must
-be a positive integer. Use `next_cursor` from the response to load older
-messages.
+When `cursor` is omitted or `null`, the API returns the newest page. Otherwise,
+pass the returned `next_cursor` object unchanged to load older messages.
+Omitting `only_my_recipient` defaults it to `false`. Every request first calls
+`GetStatus` with its `principal/token`, so invalid credentials return `401` even
+when the cursor is already at the history boundary. Credentials are accepted
+only in the JSON body; there is no authenticated GET variant.
+
+Use the read-only detail endpoint for a complete payload:
+
+```http
+POST /v1/messages/123/payload
+Content-Type: application/json
+
+{
+  "principal": "10001",
+  "token": "tok_xxx"
+}
+```
+
+Its page is `GET /message?seq=123`. The page always opens in a new tab, and
+credentials are never placed in the URL or browser storage.
 
 ```json
 {

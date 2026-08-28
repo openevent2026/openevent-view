@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import logging
 
-from .config import load_config
+from .config import ConfigError, ViewConfig, load_config
 from .history import HistoryService
 from .server import create_server
 
@@ -22,12 +22,12 @@ def main(argv: list[str] | None = None) -> int:
         from openevent.sdk import OpenEventClient
     except ImportError as exc:
         raise SystemExit(
-            "failed to import openevent-sdk; install openevent-sdk>=0.4.1 "
+            "failed to import openevent-sdk; install openevent-sdk>=0.6.0 "
             "before starting openevent-view"
         ) from exc
 
     config = load_config(args.config)
-    if args.host or args.port:
+    if args.host is not None or args.port is not None:
         config = _override_server(config, args.host, args.port)
 
     client = OpenEventClient(
@@ -37,7 +37,6 @@ def main(argv: list[str] | None = None) -> int:
     history_service = HistoryService(
         client,
         config.history,
-        config.payload,
         channel_cache_size=config.openevent.channel_cache_size,
         channel_lookup_workers=config.openevent.channel_lookup_workers,
     )
@@ -51,18 +50,27 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         server.server_close()
         history_service.close()
-        client.channel.close()
+        client.close()
     return 0
 
 
-def _override_server(config, host: str | None, port: int | None):
+def _override_server(
+    config: ViewConfig, host: str | None, port: int | None
+) -> ViewConfig:
     from dataclasses import replace
+
+    selected_host = config.server.host if host is None else host
+    selected_port = config.server.port if port is None else port
+    if not selected_host:
+        raise ConfigError("--host must be a non-empty string")
+    if selected_port < 1 or selected_port > 65535:
+        raise ConfigError("--port must be between 1 and 65535")
 
     return replace(
         config,
         server=replace(
             config.server,
-            host=host or config.server.host,
-            port=port or config.server.port,
+            host=selected_host,
+            port=selected_port,
         ),
     )

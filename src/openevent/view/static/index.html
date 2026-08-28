@@ -8,42 +8,21 @@
   </head>
   <body>
     <main class="shell">
-      <section class="toolbar" aria-label="Query filters">
-        <div class="brand">
-          <h1>OpenEvent View</h1>
-          <span id="statusText" class="status-text">Ready</span>
-        </div>
+      <section class="input-panel">
+        <div class="brand-row"><h1>OpenEvent View</h1><span id="statusText">Ready</span></div>
         <form id="queryForm" class="query-form">
-          <label>
-            <span>Principal</span>
-            <input id="principalInput" name="principal" inputmode="numeric" autocomplete="off" required />
-          </label>
-          <label class="token-field">
-            <span>Token</span>
-            <input id="tokenInput" name="token" type="password" autocomplete="off" required />
-          </label>
-          <label>
-            <span>Channel</span>
-            <input id="channelInput" name="channel_id" inputmode="numeric" autocomplete="off" />
-          </label>
-          <label class="checkbox-field">
-            <input id="recipientInput" name="only_my_recipient" type="checkbox" />
-            <span>Only recipient</span>
-          </label>
-          <button id="searchButton" type="submit">Search</button>
+          <label>Principal<input id="principalInput" name="principal" inputmode="numeric" autocomplete="off" required /></label>
+          <label>Token<input id="tokenInput" name="token" type="password" autocomplete="off" required /></label>
+          <label>Channel ID<input id="channelInput" name="channel_id" inputmode="numeric" autocomplete="off" /></label>
+          <label class="checkbox"><input id="recipientInput" name="only_my_recipient" type="checkbox" /> Only recipient</label>
+          <button id="searchButton" type="submit">Query</button>
+          <button id="latestButton" type="button" disabled>View latest</button>
         </form>
       </section>
-
-      <section class="results-head" aria-live="polite">
-        <div>
-          <strong id="resultTitle">History Messages</strong>
-          <span id="resultMeta"></span>
-        </div>
-        <button id="nextButton" type="button" disabled>Next Page</button>
-      </section>
-
-      <section id="messageList" class="message-list" aria-label="History message list">
-        <div class="empty-state">Enter a principal and token to query history messages.</div>
+      <section class="results-panel">
+        <div class="results-head"><div><strong id="resultTitle">History messages</strong><span id="resultMeta"></span></div><div class="pager"><button id="previousButton" type="button" disabled>Previous</button><button id="nextButton" type="button" disabled>Next</button></div></div>
+        <div id="errorBanner" class="error-banner" role="alert" hidden></div>
+        <div id="messageList" class="message-list" aria-live="polite"><div class="empty-state">Enter a principal and token to query history messages.</div></div>
       </section>
     </main>
     <script src="/static/app.js"></script>

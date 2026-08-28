@@ -25,7 +25,8 @@ import sys
 requirements = [
     ("yaml", "PyYAML"),
     ("grpc", "grpcio"),
-    ("openevent.sdk", "openevent-sdk>=0.4.1"),
+    ("openevent.sdk", "openevent-sdk>=0.6.0"),
+    ("orjson", "orjson>=3.10"),
 ]
 missing = [package for module, package in requirements if importlib.util.find_spec(module) is None]
 if missing:
@@ -39,11 +40,20 @@ if missing:
 try:
     version = importlib.metadata.version("openevent-sdk")
 except importlib.metadata.PackageNotFoundError:
-    print("missing Python dependency: openevent-sdk>=0.4.1", file=sys.stderr)
+    print("missing Python dependency: openevent-sdk>=0.6.0", file=sys.stderr)
     sys.exit(2)
 parts = tuple(int(part) for part in version.split(".")[:3] if part.isdigit())
-if parts < (0, 4, 1):
-    print(f"openevent-sdk>=0.4.1 is required, found {version}", file=sys.stderr)
+if parts < (0, 6, 0):
+    print(f"openevent-sdk>=0.6.0 is required, found {version}", file=sys.stderr)
+    sys.exit(2)
+try:
+    orjson_version = importlib.metadata.version("orjson")
+except importlib.metadata.PackageNotFoundError:
+    print("missing Python dependency: orjson>=3.10", file=sys.stderr)
+    sys.exit(2)
+orjson_parts = tuple(int(part) for part in orjson_version.split(".")[:3] if part.isdigit())
+if orjson_parts < (3, 10, 0):
+    print(f"orjson>=3.10 is required, found {orjson_version}", file=sys.stderr)
     sys.exit(2)
 PY
 

@@ -1,451 +1,297 @@
+import base64
+import types
 import unittest
-import threading
-from dataclasses import dataclass
-from time import sleep
 
-from openevent.view.config import HistoryConfig, PayloadConfig
+import grpc
+
+from openevent.view.config import HistoryConfig
 from openevent.view.history import (
-    HistoryQuery,
     HistoryService,
+    MessageNotFound,
+    PayloadQuery,
+    RequestError,
     UpstreamProtocolError,
     encode_payload,
     parse_history_query,
+    parse_payload_query,
+    parse_seq,
 )
 
 
-@dataclass
-class FakeStatus:
-    min_seq: int
-    max_seq: int
+def message(seq, channel=7, payload=b'{"n":1}', principal=100, recipients=(100,)):
+    return types.SimpleNamespace(
+        seq=seq,
+        uuid=seq + 1000,
+        ts_ms=1700000000000 + seq,
+        channel_id=channel,
+        principal=principal,
+        recipients=list(recipients),
+        payload=payload,
+        object_keys=[
+            types.SimpleNamespace(object_id=900 + seq, object_token="secret-token")
+        ],
+    )
 
 
-@dataclass
-class FakeMessage:
-    seq: int
-    ts_ms: int
-    channel_id: int
-    principal: int
-    recipients: list[int]
-    payload: bytes
+class FakeRpcError(grpc.RpcError):
+    def __init__(self, status_code):
+        self._status_code = status_code
 
-
-@dataclass
-class FakeFetchResponse:
-    messages: list[FakeMessage]
-    next_seq: int
-    last_seq: int
-
-
-@dataclass
-class FakeChannel:
-    channel_id: int
-    name: str
-
-
-@dataclass
-class FakeChannelResponse:
-    channel: FakeChannel
+    def code(self):
+        return self._status_code
 
 
 class FakeClient:
-    def __init__(self, messages, channels=None):
-        self.messages = messages
-        self.channels = channels or {}
-        self.fetch_calls = []
+    def __init__(self, messages, min_seq=1, max_seq=None):
+        self.messages = sorted(messages, key=lambda item: item.seq)
+        self.min_seq = min_seq
+        self.max_seq = max_seq if max_seq is not None else (
+            self.messages[-1].seq if self.messages else 0
+        )
+        self.calls = []
+        self.channels = {}
 
     def get_status(self, principal, token):
-        if not self.messages:
-            return FakeStatus(min_seq=0, max_seq=0)
-        return FakeStatus(min_seq=min(message.seq for message in self.messages), max_seq=max(message.seq for message in self.messages))
+        self.calls.append(("status", principal, token))
+        return types.SimpleNamespace(min_seq=self.min_seq, max_seq=self.max_seq)
 
-    def get_channel(self, principal, token, channel_id):
-        return FakeChannelResponse(
-            FakeChannel(channel_id, self.channels.get(channel_id, f"channel-{channel_id}"))
+    def fetch(
+        self,
+        principal,
+        token,
+        from_seq,
+        limit,
+        only_my_recipient=False,
+        channels=(),
+    ):
+        self.calls.append(("fetch", from_seq, limit, only_my_recipient, channels))
+        visible = [
+            item
+            for item in self.messages
+            if item.seq >= from_seq
+            and (not channels or item.channel_id in channels)
+            and (
+                not only_my_recipient
+                or principal in {int(recipient) for recipient in item.recipients}
+            )
+        ][:limit]
+        next_seq = visible[-1].seq + 1 if visible else self.max_seq + 1
+        return types.SimpleNamespace(
+            messages=visible,
+            next_seq=next_seq,
+            last_seq=self.max_seq,
         )
 
-    def fetch(self, principal, token, from_seq, limit, only_my_recipient=False, channels=()):
-        channels = tuple(channels)
-        self.fetch_calls.append((from_seq, limit, only_my_recipient, channels))
-        matches = [message for message in self.messages if message.seq >= from_seq]
-        if channels:
-            matches = [message for message in matches if message.channel_id in channels]
-        if only_my_recipient:
-            matches = [message for message in matches if principal in message.recipients]
-        batch = matches[:limit]
-        status = self.get_status(principal, token)
-        next_seq = batch[-1].seq + 1 if len(matches) > len(batch) else status.max_seq + 1
-        return FakeFetchResponse(messages=batch, next_seq=next_seq, last_seq=status.max_seq)
-
-
-class ScriptedFetchClient(FakeClient):
-    def __init__(self, messages, responses):
-        super().__init__(messages)
-        self.responses = list(responses)
-
-    def fetch(self, principal, token, from_seq, limit, only_my_recipient=False, channels=()):
-        self.fetch_calls.append((from_seq, limit, only_my_recipient, tuple(channels)))
-        if not self.responses:
-            raise AssertionError("unexpected Fetch call")
-        return self.responses.pop(0)
-
-
-class ConcurrentChannelClient(FakeClient):
-    def __init__(self, messages, fail_channel_id=None):
-        super().__init__(messages)
-        self.fail_channel_id = fail_channel_id
-        self.get_channel_calls = []
-        self.active_channel_calls = 0
-        self.max_active_channel_calls = 0
-        self.lock = threading.Lock()
-
     def get_channel(self, principal, token, channel_id):
-        with self.lock:
-            self.get_channel_calls.append((principal, token, channel_id))
-            self.active_channel_calls += 1
-            self.max_active_channel_calls = max(
-                self.max_active_channel_calls,
-                self.active_channel_calls,
+        self.calls.append(("channel", channel_id))
+        name, protocol = self.channels.get(
+            channel_id, (f"channel-{channel_id}", "chat.v1")
+        )
+        return types.SimpleNamespace(
+            channel=types.SimpleNamespace(name=name, protocol=protocol)
+        )
+
+
+class ShortPageClient(FakeClient):
+    def fetch(self, *args, **kwargs):
+        from_seq = kwargs["from_seq"]
+        self.calls.append(
+            (
+                "fetch",
+                from_seq,
+                kwargs["limit"],
+                kwargs["only_my_recipient"],
+                kwargs["channels"],
             )
-        try:
-            sleep(0.02)
-            if channel_id == self.fail_channel_id:
-                raise RuntimeError("GetChannel failed")
-            return FakeChannelResponse(FakeChannel(channel_id, f"channel-{channel_id}"))
-        finally:
-            with self.lock:
-                self.active_channel_calls -= 1
+        )
+        scripted = {
+            2: ([self.messages[0]], 3),
+            3: ([], 4),
+            4: ([self.messages[1]], 5),
+        }
+        messages, next_seq = scripted[from_seq]
+        return types.SimpleNamespace(
+            messages=messages,
+            next_seq=next_seq,
+            last_seq=self.max_seq,
+        )
 
 
 class HistoryTests(unittest.TestCase):
-    def test_payload_json(self):
-        payload = encode_payload(b'{"kind":"sync.record","data":{"text":"hi"}}', PayloadConfig())
-        self.assertEqual(payload["encoding"], "utf-8")
-        self.assertEqual(payload["json"]["kind"], "sync.record")
+    def setUp(self):
+        self.config = HistoryConfig(default_limit=2, max_limit=10, fetch_batch_size=2)
 
-    def test_payload_text_fallback(self):
-        payload = encode_payload(b"not-json", PayloadConfig())
-        self.assertEqual(payload["text"], "not-json")
-        self.assertEqual(payload["json"], None)
-        self.assertIn("json_error", payload)
+    def make_service(self, client, config=None):
+        service = HistoryService(client, config or self.config)
+        self.addCleanup(service.close)
+        return service
 
-    def test_desc_query_returns_latest_first(self):
-        client = FakeClient(
-            [
-                FakeMessage(1, 10, 100, 1, [], b'{"n":1}'),
-                FakeMessage(2, 20, 100, 1, [], b'{"n":2}'),
-                FakeMessage(3, 30, 100, 1, [], b'{"n":3}'),
-            ],
-            channels={100: "orders"},
-        )
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=2, max_limit=1000, fetch_batch_size=2),
-            PayloadConfig(),
-        )
-        result = service.query(HistoryQuery(1, "tok", None, 2, "desc", None, False))
-        self.assertEqual([item["seq"] for item in result["messages"]], [3, 2])
-        self.assertEqual(result["messages"][0]["channel_name"], "orders")
-        self.assertEqual(result["next_cursor"], "2")
-
-    def test_desc_channel_filter(self):
-        client = FakeClient(
-            [
-                FakeMessage(1, 10, 100, 1, [], b'{"n":1}'),
-                FakeMessage(2, 20, 200, 1, [], b'{"n":2}'),
-                FakeMessage(3, 30, 100, 1, [], b'{"n":3}'),
-            ]
-        )
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=2, max_limit=1000, fetch_batch_size=3),
-            PayloadConfig(),
-        )
-        result = service.query(HistoryQuery(1, "tok", None, 2, "desc", 100, False))
-        self.assertEqual([item["seq"] for item in result["messages"]], [3, 1])
-        self.assertTrue(all(call[3] == (100,) for call in client.fetch_calls))
-
-    def test_desc_query_continues_through_sparse_empty_windows(self):
-        client = FakeClient(
-            [
-                FakeMessage(85, 850, 100, 1, [], b'{"n":85}'),
-                FakeMessage(100, 1000, 200, 1, [], b'{"n":100}'),
-            ]
-        )
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=2, max_limit=1000, fetch_batch_size=10),
-            PayloadConfig(),
-        )
-        result = service.query(HistoryQuery(1, "tok", None, 2, "desc", 100, False))
-        self.assertEqual([item["seq"] for item in result["messages"]], [85])
-        self.assertIsNone(result["next_cursor"])
-
-    def test_desc_query_does_not_report_more_after_history_start(self):
-        client = FakeClient(
-            [
-                FakeMessage(1, 10, 100, 1, [], b'{"n":1}'),
-                FakeMessage(2, 20, 200, 1, [], b'{"n":2}'),
-                FakeMessage(3, 30, 200, 1, [], b'{"n":3}'),
-            ]
-        )
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=5, max_limit=1000, fetch_batch_size=10),
-            PayloadConfig(),
-        )
-        result = service.query(HistoryQuery(1, "tok", None, 5, "desc", 100, False))
-        self.assertEqual([item["seq"] for item in result["messages"]], [1])
-        self.assertIsNone(result["next_cursor"])
-
-    def test_desc_query_completes_short_window_without_omissions(self):
-        messages = [
-            FakeMessage(seq, seq * 10, 100, 1, [], f'{{"n":{seq}}}'.encode())
-            for seq in range(1, 5)
-        ]
-        client = ScriptedFetchClient(
-            messages,
-            [
-                FakeFetchResponse(messages=[messages[2]], next_seq=4, last_seq=4),
-                FakeFetchResponse(messages=[messages[3]], next_seq=5, last_seq=4),
-            ],
-        )
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=2, max_limit=1000, fetch_batch_size=4),
-            PayloadConfig(),
-        )
-
-        result = service.query(HistoryQuery(1, "tok", None, 2, "desc", None, False))
-
-        self.assertEqual([item["seq"] for item in result["messages"]], [4, 3])
-        self.assertEqual(result["next_cursor"], "3")
-        self.assertEqual([(call[0], call[1]) for call in client.fetch_calls], [(3, 2), (4, 1)])
-
-        next_client = ScriptedFetchClient(
-            messages,
-            [FakeFetchResponse(messages=messages[:2], next_seq=3, last_seq=4)],
-        )
-        next_service = HistoryService(
-            next_client,
-            HistoryConfig(default_limit=2, max_limit=1000, fetch_batch_size=4),
-            PayloadConfig(),
-        )
-        next_result = next_service.query(HistoryQuery(1, "tok", 3, 2, "desc", None, False))
-        self.assertEqual([item["seq"] for item in next_result["messages"]], [2, 1])
-
-    def test_desc_query_continues_empty_page_inside_window(self):
-        messages = [
-            FakeMessage(seq, seq * 10, 100, 1, [], f'{{"n":{seq}}}'.encode())
-            for seq in range(1, 5)
-        ]
-        client = ScriptedFetchClient(
-            messages,
-            [
-                FakeFetchResponse(messages=[], next_seq=4, last_seq=4),
-                FakeFetchResponse(messages=[messages[3]], next_seq=5, last_seq=4),
-                FakeFetchResponse(messages=[messages[1]], next_seq=3, last_seq=4),
-            ],
-        )
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=2, max_limit=1000, fetch_batch_size=4),
-            PayloadConfig(),
-        )
-
-        result = service.query(HistoryQuery(1, "tok", None, 2, "desc", None, False))
-
-        self.assertEqual([item["seq"] for item in result["messages"]], [4, 2])
-        self.assertEqual([(call[0], call[1]) for call in client.fetch_calls], [(3, 2), (4, 1), (2, 1)])
-
-    def test_desc_query_rejects_non_advancing_fetch_cursor(self):
-        messages = [FakeMessage(1, 10, 100, 1, [], b'{"n":1}')]
-        client = ScriptedFetchClient(
-            messages,
-            [FakeFetchResponse(messages=[], next_seq=1, last_seq=1)],
-        )
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=1, max_limit=1000, fetch_batch_size=1),
-            PayloadConfig(),
-        )
-
-        with self.assertRaises(UpstreamProtocolError):
-            service.query(HistoryQuery(1, "tok", None, 1, "desc", None, False))
-
-    def test_asc_query_uses_last_seq_for_more(self):
-        client = FakeClient(
-            [
-                FakeMessage(1, 10, 100, 1, [], b'{"n":1}'),
-                FakeMessage(2, 20, 100, 1, [], b'{"n":2}'),
-                FakeMessage(3, 30, 100, 1, [], b'{"n":3}'),
-            ]
-        )
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=2, max_limit=1000, fetch_batch_size=2),
-            PayloadConfig(),
-        )
-        result = service.query(HistoryQuery(1, "tok", None, 2, "asc", None, False))
-        self.assertEqual([item["seq"] for item in result["messages"]], [1, 2])
-        self.assertEqual(result["next_cursor"], "3")
-
-    def test_asc_query_continues_empty_short_page(self):
-        messages = [
-            FakeMessage(seq, seq * 10, 100, 1, [], f'{{"n":{seq}}}'.encode())
-            for seq in range(1, 5)
-        ]
-        client = ScriptedFetchClient(
-            messages,
-            [
-                FakeFetchResponse(messages=[], next_seq=3, last_seq=4),
-                FakeFetchResponse(messages=messages[2:], next_seq=5, last_seq=4),
-            ],
-        )
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=2, max_limit=1000, fetch_batch_size=4),
-            PayloadConfig(),
-        )
-
-        result = service.query(HistoryQuery(1, "tok", None, 2, "asc", None, False))
-
-        self.assertEqual([item["seq"] for item in result["messages"]], [3, 4])
-        self.assertEqual([call[0] for call in client.fetch_calls], [1, 3])
-
-    def test_asc_query_rejects_non_advancing_fetch_cursor_inside_tail(self):
-        messages = [FakeMessage(1, 10, 100, 1, [], b'{"n":1}')]
-        client = ScriptedFetchClient(
-            messages,
-            [FakeFetchResponse(messages=[], next_seq=1, last_seq=1)],
-        )
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=1, max_limit=1000, fetch_batch_size=1),
-            PayloadConfig(),
-        )
-
-        with self.assertRaises(UpstreamProtocolError):
-            service.query(HistoryQuery(1, "tok", None, 1, "asc", None, False))
-
-    def test_asc_query_allows_cursor_beyond_current_tail(self):
-        messages = [
-            FakeMessage(1, 10, 100, 1, [], b'{"n":1}'),
-            FakeMessage(2, 20, 100, 1, [], b'{"n":2}'),
-        ]
-        client = ScriptedFetchClient(
-            messages,
-            [FakeFetchResponse(messages=[], next_seq=3, last_seq=2)],
-        )
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=1, max_limit=1000, fetch_batch_size=1),
-            PayloadConfig(),
-        )
-
-        result = service.query(HistoryQuery(1, "tok", 10, 1, "asc", None, False))
-
-        self.assertEqual(result["messages"], [])
-        self.assertIsNone(result["next_cursor"])
-
-    def test_asc_channel_filter_uses_page_limit(self):
-        client = FakeClient(
-            [
-                FakeMessage(1, 10, 100, 1, [], b'{"n":1}'),
-                FakeMessage(2, 20, 100, 1, [], b'{"n":2}'),
-                FakeMessage(3, 30, 100, 1, [], b'{"n":3}'),
-            ]
-        )
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=2, max_limit=1000, fetch_batch_size=10),
-            PayloadConfig(),
-        )
-        result = service.query(HistoryQuery(1, "tok", None, 2, "asc", 100, False))
-        self.assertEqual([item["seq"] for item in result["messages"]], [1, 2])
-        self.assertEqual(result["next_cursor"], "3")
-        self.assertEqual(client.fetch_calls[0], (1, 2, False, (100,)))
-
-    def test_parse_query_defaults(self):
-        query = parse_history_query({"principal": "10", "token": "tok"}, HistoryConfig(default_limit=7))
-        self.assertEqual(query.limit, 7)
-        self.assertEqual(query.order, "desc")
-        self.assertIsNone(query.cursor)
-
-    def test_parse_query_rejects_zero_limit(self):
-        with self.assertRaises(ValueError):
-            parse_history_query({"principal": "10", "token": "tok", "limit": 0}, HistoryConfig())
-
-    def test_parse_query_rejects_zero_cursor(self):
-        with self.assertRaisesRegex(ValueError, "cursor must be a positive integer"):
+    def test_query_authenticates_at_the_history_boundary(self):
+        client = FakeClient([message(1)], min_seq=1, max_seq=1)
+        result = self.make_service(client).query(
             parse_history_query(
-                {"principal": "10", "token": "tok", "cursor": 0},
-                HistoryConfig(),
+                {
+                    "principal": "100",
+                    "token": "t",
+                    "cursor": {"before_seq": "1"},
+                },
+                self.config,
             )
-
-    def test_channel_names_are_loaded_concurrently_and_cached(self):
-        messages = [
-            FakeMessage(seq, seq * 10, seq, 1, [], b"{}")
-            for seq in range(1, 5)
-        ]
-        client = ConcurrentChannelClient(messages)
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=4, max_limit=1000, fetch_batch_size=4),
-            PayloadConfig(),
-            channel_cache_size=8,
-            channel_lookup_workers=2,
         )
-        query = HistoryQuery(1, "tok", None, 4, "asc", None, False)
-        first = service.query(query)
-        second = service.query(query)
-        service.close()
+        self.assertEqual(result["messages"], [])
+        self.assertEqual(client.calls[0][0], "status")
 
-        self.assertEqual(client.max_active_channel_calls, 2)
-        self.assertEqual(len(client.get_channel_calls), 4)
-        self.assertEqual(first["messages"][0]["channel_name"], "channel-1")
-        self.assertEqual(second["messages"][3]["channel_name"], "channel-4")
+    def test_descending_cursor_scans_multiple_windows_without_skipping(self):
+        config = HistoryConfig(default_limit=3, max_limit=10, fetch_batch_size=2)
+        client = FakeClient([message(seq) for seq in range(1, 6)])
+        service = self.make_service(client, config)
 
-    def test_channel_name_failure_fails_query(self):
-        messages = [FakeMessage(1, 10, 100, 1, [], b"{}")]
-        client = ConcurrentChannelClient(messages, fail_channel_id=100)
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=1, max_limit=1000, fetch_batch_size=1),
-            PayloadConfig(),
+        first = service.query(parse_history_query({"principal": "100", "token": "t"}, config))
+        second = service.query(
+            parse_history_query(
+                {
+                    "principal": "100",
+                    "token": "t",
+                    "cursor": first["next_cursor"],
+                },
+                config,
+            )
         )
-        with self.assertRaisesRegex(RuntimeError, "GetChannel failed"):
-            service.query(HistoryQuery(1, "tok", None, 1, "asc", None, False))
-        service.close()
 
-    def test_empty_channel_name_fails_query(self):
-        messages = [FakeMessage(1, 10, 100, 1, [], b"{}")]
-        client = FakeClient(messages, channels={100: ""})
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=1, max_limit=1000, fetch_batch_size=1),
-            PayloadConfig(),
+        self.assertEqual([item["seq"] for item in first["messages"]], ["5", "4", "3"])
+        self.assertEqual(first["next_cursor"], {"before_seq": "3"})
+        self.assertEqual([item["seq"] for item in second["messages"]], ["2", "1"])
+        self.assertIsNone(second["next_cursor"])
+
+    def test_short_fetch_pages_are_completed_before_descending_selection(self):
+        client = ShortPageClient([message(2), message(4)], min_seq=1, max_seq=4)
+        result = self.make_service(client).query(
+            parse_history_query({"principal": "100", "token": "t"}, self.config)
         )
-        with self.assertRaisesRegex(UpstreamProtocolError, "empty channel name"):
-            service.query(HistoryQuery(1, "tok", None, 1, "asc", None, False))
-        service.close()
 
-    def test_channel_name_cache_is_lru_bounded(self):
-        messages = [
-            FakeMessage(seq, seq * 10, seq, 1, [], b"{}")
-            for seq in range(1, 4)
-        ]
-        client = ConcurrentChannelClient(messages)
-        service = HistoryService(
-            client,
-            HistoryConfig(default_limit=1, max_limit=1000, fetch_batch_size=1),
-            PayloadConfig(),
-            channel_cache_size=2,
+        self.assertEqual([item["seq"] for item in result["messages"]], ["4", "2"])
+        self.assertEqual(
+            [call[1] for call in client.calls if call[0] == "fetch"], [3, 4, 2]
         )
-        for cursor in (1, 2, 3, 1):
-            service.query(HistoryQuery(1, "tok", cursor, 1, "asc", None, False))
-        service.close()
 
-        self.assertEqual([call[2] for call in client.get_channel_calls], [1, 2, 3, 1])
+    def test_recipient_filter_scans_past_nonmatching_messages(self):
+        client = FakeClient(
+            [
+                message(1, recipients=(100,)),
+                message(2, recipients=(100,)),
+                message(3, recipients=(200,)),
+            ]
+        )
+        result = self.make_service(client).query(
+            parse_history_query(
+                {
+                    "principal": "100",
+                    "token": "t",
+                    "only_my_recipient": True,
+                },
+                self.config,
+            )
+        )
+
+        self.assertEqual([item["seq"] for item in result["messages"]], ["2", "1"])
+        self.assertIsNone(result["next_cursor"])
+
+    def test_channel_filter_at_boundary_still_loads_display_metadata(self):
+        client = FakeClient([], min_seq=1, max_seq=5)
+        result = self.make_service(client).query(
+            parse_history_query(
+                {
+                    "principal": "100",
+                    "token": "t",
+                    "channel_id": "7",
+                    "cursor": {"before_seq": "1"},
+                },
+                self.config,
+            )
+        )
+
+        self.assertEqual(result["channel"]["channel_name"], "channel-7")
+        self.assertIn(("channel", 7), client.calls)
+
+    def test_message_projection_hides_object_tokens(self):
+        client = FakeClient([message(1)])
+        result = self.make_service(client).query(
+            parse_history_query({"principal": "100", "token": "t"}, self.config)
+        )
+
+        serialized = result["messages"][0]
+        self.assertEqual(serialized["object_ids"], ["901"])
+        self.assertNotIn("object_keys", serialized)
+        self.assertNotIn("secret-token", str(serialized))
+
+    def test_payload_lookup_returns_full_payload(self):
+        payload = b"x" * 20000
+        client = FakeClient([message(2, payload=payload)], min_seq=1, max_seq=2)
+        result = self.make_service(client).get_payload(
+            2, PayloadQuery(principal=100, token="t")
+        )
+
+        self.assertEqual(result["message"]["payload"]["text"], "x" * 20000)
+        self.assertFalse(result["message"]["payload"]["truncated"])
+        self.assertEqual(result["message"]["object_ids"], ["902"])
+
+    def test_payload_lookup_hides_permission_denied_as_not_found(self):
+        class DeniedClient(FakeClient):
+            def fetch(self, *args, **kwargs):
+                raise FakeRpcError(grpc.StatusCode.PERMISSION_DENIED)
+
+        service = self.make_service(DeniedClient([message(2)], min_seq=1, max_seq=2))
+        with self.assertRaises(MessageNotFound):
+            service.get_payload(2, PayloadQuery(principal=100, token="t"))
+
+    def test_large_payload_preview_preserves_byte_boundaries(self):
+        text_payload = b"a" * 8191 + "€".encode("utf-8") + b"b" * 9000
+        preview = encode_payload(text_payload)
+        self.assertEqual(preview["encoding"], "utf-8")
+        self.assertEqual(preview["preview"]["head_bytes"], 8191)
+        self.assertEqual(preview["preview"]["head"], "a" * 8191)
+
+        binary_preview = encode_payload(b"\xff" * 17000)
+        self.assertEqual(binary_preview["encoding"], "base64")
+        self.assertEqual(
+            len(base64.b64decode(binary_preview["preview"]["head"])), 8192
+        )
+
+    def test_strict_history_query_parsing(self):
+        with self.assertRaises(RequestError):
+            parse_history_query({"principal": 100, "token": "t"}, self.config)
+        with self.assertRaises(RequestError):
+            parse_history_query(
+                {
+                    "principal": "100",
+                    "token": "t",
+                    "cursor": {"before_seq": "01"},
+                },
+                self.config,
+            )
+        with self.assertRaises(RequestError):
+            parse_history_query(
+                {"principal": "100", "token": "t", "limit": True}, self.config
+            )
+        self.assertEqual(
+            parse_payload_query({"principal": "100", "token": "t"}).principal, 100
+        )
+        self.assertEqual(parse_seq("42"), 42)
+
+    def test_fetch_progress_is_required(self):
+        class BadClient(FakeClient):
+            def fetch(self, *args, **kwargs):
+                return types.SimpleNamespace(
+                    messages=[],
+                    next_seq=kwargs["from_seq"],
+                    last_seq=self.max_seq,
+                )
+
+        service = self.make_service(BadClient([message(1), message(2), message(3)]))
+        with self.assertRaises(UpstreamProtocolError):
+            service.query(
+                parse_history_query({"principal": "100", "token": "t"}, self.config)
+            )
 
 
 if __name__ == "__main__":
